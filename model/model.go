@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/zt64/logcat-tui/logcat"
@@ -20,22 +21,30 @@ var (
 	fatalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true)
 )
 
+// model represents the state of the logcat TUI
 type model struct {
-	channel        chan lineMsg
-	lines          []string
-	terminalHeight int
-	scrollOffset   int
-	lineLimit      int
-	autoscroll     bool
+	channel        chan lineMsg // Channel to receive logcat messages
+	lines          []string     // Logcat messages currently displayed
+	terminalHeight int          // Height of the terminal
+	scrollOffset   int          // Offset to scroll the logcat output
+	lineLimit      int          // Maximum number of lines to keep in memory
+	autoscroll     bool         // Whether to autoscroll the logcat output
+	textInput      textinput.Model
 }
 
 func InitializeModel() model {
 	c := make(chan lineMsg)
 	go startLogcat(c)
+
+	ti := textinput.New()
+	ti.Focus()
+	ti.CharLimit = 156
+	ti.Width = 20
 	return model{
 		channel:    c,
 		lineLimit:  10000,
 		autoscroll: true,
+		textInput:  ti,
 	}
 }
 
@@ -46,12 +55,13 @@ func waitForActivity(sub chan lineMsg) tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	tea.SetWindowTitle("Bubble Tea Example")
+	tea.SetWindowTitle("logcat TUI")
 	return tea.Batch(
 		waitForActivity(m.channel),
 	)
 }
 
+// Update handles messages from the logcat channel and user input
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case lineMsg:
@@ -77,6 +87,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlL:
 			m.scrollOffset = 0
 			m.autoscroll = true
+		case tea.KeyPgUp:
+			m.scrollOffset -= m.terminalHeight
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+		case tea.KeyPgDown:
+			m.scrollOffset += m.terminalHeight
+			if m.scrollOffset > len(m.lines)-m.terminalHeight {
+				m.scrollOffset = len(m.lines) - m.terminalHeight
+			}
 		case tea.KeyUp:
 			m.autoscroll = false
 			if m.scrollOffset > 0 {
@@ -95,15 +115,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// View renders the logcat output
 func (m model) View() string {
 	start := m.scrollOffset
 	end := start + m.terminalHeight
 	if end >= len(m.lines) {
-		end = len(m.lines) - 1
+		end = len(m.lines)
 	}
 
-	visibleLines := m.lines[start : end+1]
-	return strings.Join(visibleLines, "\n")
+	var sb strings.Builder
+
+	for _, line := range m.lines[start:end] {
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Render("↑/↓: Scroll | Ctrl-L: Bottom | Ctrl-C: Quit"))
+	return sb.String()
 }
 
 func colorize(s string, p logcat.Priority) string {
@@ -137,6 +165,8 @@ func startLogcat(lines chan<- lineMsg) {
 	if err := cmd.Start(); err != nil {
 		log.Fatal(err)
 	}
+	defer cmd.Wait() // Ensure the command is properly waited for
+
 	buf := bufio.NewReader(reader)
 	for {
 		line, _, err := buf.ReadLine()
@@ -148,6 +178,14 @@ func startLogcat(lines chan<- lineMsg) {
 		if lineStr == "--------- beginning of system" {
 			continue
 		}
-		lines <- parseLine(lineStr)
+
+		parsedLine, err := parseLine(lineStr)
+		if err != nil {
+			// log.Printf("error parsing line: %v\nLine: %s", err, lineStr)
+			// TODO: Handle error
+			continue
+		}
+
+		lines <- parsedLine
 	}
 }
